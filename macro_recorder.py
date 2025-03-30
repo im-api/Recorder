@@ -19,6 +19,7 @@ class MacroRecorder:
         self.recording = False
         self.playing = False
         self.action_key = "F6"  # Default hotkey
+        self.action_key_lower = "f6"  # Lowercase version for comparison
         self.mouse_mode = "screen"  # Options: screen, window, relative
         self.record_sleep = True
         self.log_arr = []
@@ -35,11 +36,14 @@ class MacroRecorder:
         self.min_delay_between_moves = 50  # Minimum milliseconds between mouse move recordings
         self.last_mouse_record_time = 0
         
+        # Track the time of last recording so we can reset it properly
+        self.last_time = None
+        
         # Set up the hidden UI
         self._setup_ui()
         
         # Setup keyboard hooks
-        keyboard.on_press_key(self.action_key, self._key_action_callback, suppress=False)
+        keyboard.on_press_key(self.action_key, self._key_action_callback, suppress=True)
         
         # Start the background thread to add randomness
         self._start_randomness_thread()
@@ -129,6 +133,10 @@ class MacroRecorder:
         self.last_mouse_y = 0
         self.last_mouse_record_time = 0
         
+        # IMPORTANT FIX: Reset last_time to reset sleep timer when starting a new recording
+        # This fixes the issue of counting sleep time between recordings
+        self.last_time = time.time() * 1000
+        
         # Initialize log
         self.log()
         self.recording = True
@@ -157,9 +165,9 @@ class MacroRecorder:
         # For function keys
         for i in range(1, 13):
             key = f'f{i}'
-            if key != self.action_key:  # Skip the action key
-                keyboard.on_press_key(key, self._on_key_press, suppress=False)
-                keyboard.on_release_key(key, self._on_key_release, suppress=False)
+            # Always monitor action key but handle it specially
+            keyboard.on_press_key(key, self._on_key_press, suppress=False)
+            keyboard.on_release_key(key, self._on_key_release, suppress=False)
         
         # For other common keys
         for key in ['esc', 'tab', 'caps lock', 'space', 'backspace', 'enter', 'insert', 
@@ -235,7 +243,11 @@ class MacroRecorder:
 
     def _on_key_press(self, e):
         """Handle key press events"""
-        if not self.recording or e.name == self.action_key:
+        if not self.recording:
+            return
+            
+        # If this is the F6 key (our action key) - don't record it
+        if e.name and e.name.lower() == self.action_key_lower:
             return
             
         key_name = e.name
@@ -247,7 +259,11 @@ class MacroRecorder:
 
     def _on_key_release(self, e):
         """Handle key release events"""
-        if not self.recording or e.name == self.action_key:
+        if not self.recording:
+            return
+            
+        # If this is the F6 key (our action key) - don't record it
+        if e.name and e.name.lower() == self.action_key_lower:
             return
             
         key_name = e.name
@@ -262,7 +278,8 @@ class MacroRecorder:
         """Log an action with timing information"""
         current_time = time.time() * 1000  # Convert to milliseconds
         
-        if not hasattr(self, 'last_time'):
+        # Initialize last_time if not set
+        if self.last_time is None:
             self.last_time = current_time
             
         if not text:
@@ -274,11 +291,16 @@ class MacroRecorder:
         # Add sleep command if delay is significant
         if delay > 200:
             sleep_comment = "" if self.record_sleep else ";"
-            self.log_arr.append(f"{sleep_comment}Sleep, {delay // 2}")
+            
+            # Don't add Sleep commands at the beginning of recording
+            if len(self.log_arr) > 0:
+                self.log_arr.append(f"{sleep_comment}Sleep, {delay // 2}")
         
         # Format keyboard input
         if keyboard:
-            self.log_arr.append(f"Send, {text}")
+            # Don't log if this is the action key (F6)
+            if not text.lower().find(self.action_key_lower) > -1:
+                self.log_arr.append(f"Send, {text}")
         else:
             self.log_arr.append(text)
 
@@ -313,7 +335,7 @@ class MacroRecorder:
         keyboard.unhook_all()
         
         # Re-hook the action key
-        keyboard.on_press_key(self.action_key, self._key_action_callback, suppress=False)
+        keyboard.on_press_key(self.action_key, self._key_action_callback, suppress=True)
         
         
         # Make sure log_arr is populated before saving
@@ -321,16 +343,36 @@ class MacroRecorder:
             # Add proper filename format at the top
             file_name = f"{self.next_file_number}.txt"
             full_file_path = os.path.join(self.script_dir, file_name)
-            file_header = f""
+            file_header = f"@{full_file_path.replace('\\', '/')}\n"
             
             # Add all the recorded actions
-            output = file_header
+            output = ""
             
-            for line in self.log_arr:
+            # Filter out unwanted entries
+            filtered_log = []
+            skip_next = False
+            
+            for i, line in enumerate(self.log_arr):
                 # Skip window activation code lines
                 if "tt :=" in line or "WinWait" in line or "WinActive" in line or "WinActivate" in line:
                     continue
-                    
+                
+                # Skip the F6 key entries
+                if line.lower().find("f6") > -1:
+                    # If there's a Sleep before this F6 entry, mark it to be skipped
+                    if i > 0 and self.log_arr[i-1].startswith("Sleep,"):
+                        skip_next = True
+                    continue
+                
+                # Skip Sleep entries that come right before F6 entries
+                if skip_next:
+                    skip_next = False
+                    continue
+                
+                filtered_log.append(line)
+            
+            # Write the filtered log to the output
+            for line in filtered_log:
                 output += f"{line}\n"
             
             # Ensure the directory exists
@@ -361,6 +403,9 @@ class MacroRecorder:
         
         self.recording = False
         self.log_arr = []
+        
+        # IMPORTANT: Reset last_time to None so it gets initialized on next recording
+        self.last_time = None
 
     def edit_key_action(self):
         """Open the recorded macro in a text editor"""
@@ -402,6 +447,7 @@ class MacroRecorder:
             print(f"Next file will be: {self.next_file_number}.txt")
             print(f"Mouse movements threshold: {self.mouse_threshold} pixels")
             print(f"Min delay between moves: {self.min_delay_between_moves}ms")
+            print(f"F6 key presses will be filtered from recordings")
         else:
             print(f"Next file will be: {self.next_file_number}.txt")
         
